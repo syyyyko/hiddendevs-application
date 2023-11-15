@@ -1,4 +1,4 @@
-# hiddendevs-applicatio
+# hiddendevs-application
 Here is the 200-line script. 
 * You can see more visually in case you can't appreciate what the script does when you enter the game. 
 * If you don't want to download the video, you can watch it at the following link:
