@@ -1,304 +1,309 @@
---[[
-# Here is a script of over 200 lines
-# Enter the game and verify that the system is functioning correctly.
-
-I'm tired of my attempts to apply for hiddendevs being declined.
-I tried sending visual scripts that work on their own, meaning they are not
-connected to other scripts, but they declined them due to a lack of lines. 
-So, now I'll be commenting this script, which is a script handler in ServerScriptService 
-that makes the entire vehicle system work.
-]]
-local marketplaceService = game:GetService('MarketplaceService')
+-- Obtain all necessary services
 local replicatedStorage = game:GetService('ReplicatedStorage')
-local serverStorage = game:GetService('ServerStorage')
-local httpService = game:GetService('HttpService')
+local userInputService = game:GetService('UserInputService')
+local proximityService = game:GetService('ProximityPromptService')
 local playerService = game:GetService('Players')
+local debrisService = game:GetService('Debris')
+local tweenService = game:GetService('TweenService')
+local httpService = game:GetService('HttpService')
+local starterGui = game:GetService('StarterGui')
 local runService = game:GetService('RunService')
-local debris = game:GetService('Debris')
-local gameCarsFolder = workspace:WaitForChild('gameCars')
-
-
-local tireAdd_module = script:FindFirstChild('tireAdd')
-if tireAdd_module then
-	tireAdd_module = require(tireAdd_module)
-end
-
-
--- Easy configurations for the commission buyer
-local maxRadioVolume = 0.7
-local minRadioVolume = 0.05
-local radioGamepassId = 184075492
-local spawnCarCooldown = 6 -- seconds
-
-
-
-
-
-
-
-
-
-
-
-
-
-
--------------------------------------------
-
---[[
-Memory table used to avoid infinite loops, and at some point,
-they disconnect with a for loop.
-]]
-local network = {}
-local occupants = {}
-local tires = {}
-local fuel = {}
-local radio = {}
-local flipCar = {}
-local engines = {}
-
-local carEvent = replicatedStorage.src.carEvent
+--variables required with player data
+local player = playerService.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+local humanoid = character:WaitForChild('Humanoid')
+local animator = humanoid:WaitForChild('Animator')
+local root = character:WaitForChild('HumanoidRootPart')
+--Obtains the Ui of the vehicle to be able to modify the speed in a textlabel.
+local playerGui = player.PlayerGui
+local vehicleGui = playerGui.vehicleGui
+local touchGui = playerGui:FindFirstChild('TouchGui')
+-- tables
+local cylindricals = {}
+local proximityAnims = {}
+-- objects
+local gasCanAnim
+local usingSeat
+--booleans
+local angularDebounce = false
+local endedAnimGasCan = false
+--remotes
 local addeyEvent = replicatedStorage.src.addeyEvent
-local client = replicatedStorage.src.client
-
-local whitelist = {'HumanoidRootPart', 'UpperTorso', 'LowerTorso'}
-
-local carRotation = Vector3.new(0, -90, 90)
-local keyRaydistance = 50
-local params = RaycastParams.new()
-params.FilterType = Enum.RaycastFilterType.Exclude
-params.IgnoreWater = true
-
-local keyCarToolName = 'carKeys'
-local carsStorageFolderName = 'car_storage'
-
-
---[[
-It's a simple function that checks if a part is upside down
-]]
-local function isUpsideDown(part)
-    local UpVector = part.CFrame.UpVector
-	local position = part.Position
-	local newY = position.Y + 0.4
-	return newY > (position + UpVector).Y
+local remoteEvent = replicatedStorage.src.carEvent
+local vfxFolder = replicatedStorage.src.vfx
+local clientEvent = replicatedStorage.src.client
+--connetions to optimize lag and avoid a live cycle remaining
+local seatConnection
+local inputConnection
+local heartConnection
+local angularConnection
+--function to invert a number
+function reverseSign(number)
+	return -number
 end
---[[
-This function is responsible for disconnecting all tables when the player disconnects
-or exits a car, to avoid memory losses
-]]
-local function ripNetwork(id, msg)
-    if not network[id] then return end
-
-    if occupants[id] then
-        if typeof(occupants[id]) == "RBXScriptConnection" then
-            occupants[id]:Disconnect()
-        end
-    end
-
-    if tires[id] then
-        for i,v in pairs(tires[id]) do
-            if typeof(v) == "RBXScriptConnection" then
-				v:Disconnect()
-            end
-        end
-	end
-
-    if fuel[id] then
-        fuel[id]:Disconnect()
-    end
-
-    if radio[id] then
-        radio[id]:Disconnect()
-    end
-
-    if flipCar[id] then
-        flipCar[id]:Disconnect()
-	end
-
-    if network[id]:IsDescendantOf(workspace) then
-		-- [stopping]
-		network[id].Parent.Parent.plataform.engine:Stop()
-		
-		-- [car velocity]
-		local rig = network[id].Parent.Parent.rig.suspension
-		rig.RR.CylindricalConstraint.AngularActuatorType = Enum.ActuatorType.Motor
-		rig.RR.CylindricalConstraint.MotorMaxTorque = 4500
-		rig.RL.CylindricalConstraint.AngularActuatorType = Enum.ActuatorType.Motor
-		rig.RL.CylindricalConstraint.MotorMaxTorque = 4500
-
-        -- [remove net]
-        network[id]:SetNetworkOwner(nil)
-
-        -- [engine sound stop]
-
-        network[id] = nil
-        --print(msg)
-    end
+--create an invisible part where a particleEmitter will be placed, to avoid that if the car is deleted while it has a vfx it will be deleted.
+function createPartVFX(children, pos)
+	if children.ClassName ~= 'ParticleEmitter' then return end
+	local newPart = Instance.new('Part', workspace)
+	newPart.Name = 'V_vfx'
+	newPart.Anchored = true
+	newPart.CanCollide = false
+	newPart.CanTouch = false
+	newPart.CanQuery = false
+	newPart.Size = Vector3.new(.5,.5,.5)
+	newPart.Transparency = 1
+	newPart.Position = pos
+	children.Parent = newPart
+	debrisService:AddItem(newPart, (children.Lifetime.Max*2))
 end
+--detects when the player sits down, since this script handles all the driving, instead of putting a localscript from each car, a handler from starterplayercharacter is used.
+humanoid.Seated:Connect(function(bool, seatPart)
+	--disable proximityprompt since he will be sitting in a car and will not be able to interact
+    proximityService.Enabled = not bool
 
-playerService.PlayerAdded:Connect(function(player)
-    local localId = player.UserId
-	player.CharacterAdded:Connect(function(char)
-		--[[
-		This is created to prevent tools from bugging when the player dies.
-		 It waits until the player is correctly loaded and 
-		 clones the tools from a folder
-		]]
-		repeat task.wait() until char:IsDescendantOf(workspace)
-		
-		for i,v in pairs(serverStorage.vehicleSystemTools:GetChildren()) do
-			if v:IsA('Tool') then
-				local new = v:Clone()
-				new.Parent = player.Backpack
+	if not seatPart then
+        --This if detects when the player gets off, disconnects all functions, returns the ui to its original parent, activates the backpack ui, destroys the false ui, sets the car speed to 0 to prevent the car from slowing down, iterates over a connection table to see if it has an active one and deactivates it if it does, puts the root out of the car and finally activates the jump.
+		if seatConnection then seatConnection:Disconnect() end
+		if inputConnection then inputConnection:Disconnect() end
+		if heartConnection then heartConnection:Disconnect() end
+		if touchGui then
+			touchGui.Parent = playerGui
+		end
+		starterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, true)
+		if playerGui:FindFirstChild('usingGUI') then
+			playerGui.usingGUI:Destroy()
+		end
+		if not usingSeat then return end
+		if not usingSeat:IsDescendantOf(workspace) then
+			return
+		end
+		for i, cylindrical in pairs(cylindricals) do
+			cylindrical.MotorMaxTorque = 2500
+		end
+		if angularConnection ~= nil then
+			if typeof(angularConnection) == 'RBXScriptConnection' then
+				angularConnection:Disconnect()
 			end
 		end
+		root.CFrame = usingSeat.side.WorldCFrame
+		usingSeat:FindFirstAncestorWhichIsA('Model').plataform.radio.effect.Enabled = true
+		usingSeat = nil
+		task.wait(0.3)
+		humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
+		return
+	end
+	if seatPart then
+		if seatPart.Parent.Name == 'seats' and seatPart.Parent:IsA('Folder') and seatPart.Parent:FindFirstChildWhichIsA('VehicleSeat') then
 
-        local huma = char:WaitForChild('Humanoid')
-		local lastSeat
-		
-		
-		-- Sets up various IKControl for the steering system in the car
-		local rightIK = Instance.new('IKControl', huma)
-		rightIK.Name = 'rIK'
+			if seatPart:FindFirstAncestorWhichIsA('Model') then
+                --Detects if it is a system carriage using a find to find a folder with a required name
+				if seatPart:FindFirstAncestorWhichIsA('Model'):FindFirstChild('rig') then
 
-		local leftIK = Instance.new('IKControl', huma)
-		leftIK.Name = 'lIK'
-		-- Checks if it's r6 or r15
-		if char:FindFirstChild('Torso') and not char:FindFirstChild('UpperTorso') then
-			-- r6
-			rightIK.ChainRoot = char:WaitForChild('Right Arm')
-
-			leftIK.ChainRoot = char:WaitForChild('Left Arm')
-		else
-			-- r15
-			rightIK.EndEffector = char:WaitForChild('RightHand')
-			rightIK.ChainRoot = char:WaitForChild('RightUpperArm')
-
-			leftIK.EndEffector = char:WaitForChild('LeftHand')
-			leftIK.ChainRoot = char:WaitForChild('LeftUpperArm')
-		end
-		
-
-		-- Detects when the player is seated
-		huma.Seated:Connect(function(bool, seatIn)
-			-- Checks if the player has a vehicle network afterward
-			-- If it has one, it calls the main function to disconnect everything
-            if not seatIn then
-                ripNetwork(localId, '[Seat signal] Rip')
-                lastSeat = nil
-
-                return
-            end
-			-- Checks if it's a VehicleSeat to avoid connecting a regular seat
-			-- to the player's network
-            if not seatIn:IsA('VehicleSeat') then return end
-			ripNetwork(localId, '[Seat signal] Bug-net rip')
-			-- Just in case, calls the function to disconnect any type
-			-- of connections that may still exist
-			
-			-- Sets up a function that detects when the occupant of a seat is removed or not
-			occupants[localId] = seatIn:GetPropertyChangedSignal('Occupant'):Connect(function()
-				if not seatIn.Occupant or seatIn.Occupant ~= huma then
-					
-					-- If removed, removes the network of that occupant
-					ripNetwork(localId, '[Occupant Exit] Rip')
-                end
-            end)
-			
-			-- Creates a new network for the player
-			network[localId] = seatIn
-			-- Grants the Roblox network to the player
-			seatIn:SetNetworkOwner(player)
-			-- Calls the player's UI to refresh some icons
-			addeyEvent:FireClient(player, 'refreshLockIcon', not network[localId].Parent.Parent.Configuration.locked.Value)
-			local plataform = network[localId].Parent.Parent.plataform
-			
-			local rig = network[localId].Parent.Parent.rig.suspension
-			rig.RR.CylindricalConstraint.AngularActuatorType = Enum.ActuatorType.None
-			rig.RR.CylindricalConstraint.MotorMaxTorque = 0
-			rig.RL.CylindricalConstraint.AngularActuatorType = Enum.ActuatorType.None
-			rig.RL.CylindricalConstraint.MotorMaxTorque = 0
-			
-   			 --[[
-		     	A function that is fuel, meaning it checks if the car's configuration
-		     	has the fuel system, if it does,
-		     	creates a heartbeat connected to the fuel memory, and basic calculations are performed
-		    ]]
-            task.spawn(function() -- full depletion
-                if network[localId].Parent.Parent.Configuration:FindFirstChild('fuel') then
-                    local last = tick()
-                    local fuelInt = network[localId].Parent.Parent.Configuration.fuel
-                    fuel[localId] = runService.Heartbeat:Connect(function()
-                        if not network[localId] then return end
-                        if (tick() - last) < fuelInt.rate.Value then return end
-    
-                        fuelInt.Value -= fuelInt.amount.Value
-                        last = tick()
-                    end)
-                end
-			end)
-			
-			-- Checks if the system has the addition that tires can break
-			if tireAdd_module ~= nil then
-				tires[localId] = tireAdd_module.breakTire(network[localId])
+					usingSeat = seatPart
+					local plataform = seatPart:FindFirstAncestorWhichIsA('Model').plataform
+					plataform.radio.effect.Enabled = false
+				end
 			end
-
-			-- Refreshes the radio icon
-			radio[localId] = plataform.radio.Changed:Connect(function()
-                addeyEvent:FireClient(player, 'refreshRadioIcon', not plataform.radio.IsPlaying)
-			end)
-
-            -- flip car & engine
-			local flipTick = tick()
-			plataform.engine:Play()
-			
-			-- [Handler of the function that checks if a part is upside down]
-			local passengersGui = player.PlayerGui.vehicleGui.pc.passengers.list
-            task.spawn(function()
-				flipCar[localId] = runService.Heartbeat:Connect(function()
-					if network[localId] then
-						-- In addition to checking if the car is upside down
-						-- the loop is used to play the engine sound
-						local maxSpeed = seatIn.MaxSpeed
-						local velocity = seatIn.AssemblyLinearVelocity.Magnitude
-						plataform.engine.PlaybackSpeed = (velocity / maxSpeed) + 0.1
-						if plataform:FindFirstChildWhichIsA('BodyGyro') then return end
-						if tick() - flipTick < 1.5 then return end
-						
-						-- [Verification]
-						if isUpsideDown(plataform) then
-							local b = Instance.new('BodyGyro', plataform)
-							debris:AddItem(b, 1)
-						end
-
-						flipTick = tick()
+        --detects if it is an ascent of a system vehicle
+        if not seatPart:IsA('VehicleSeat') then
+            --creates a connection to detect when the player presses space, since the jump is disabled, i.e. he can't exit the ascent, so I take him out manually
+			inputConnection = userInputService.InputBegan:Connect(function(key, gp)
+					if gp then return end
+					if key.KeyCode == Enum.KeyCode.Space then
+						humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
+						humanoid.Sit = false
 					end
-                end)
-            end)
+				end)
+				return
+			end
+            --disable backpack
+			starterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, false)
+			if vehicleGui:FindFirstChild('usingGUI') then vehicleGui.usingGUI:Destroy() end
+            --states some important variables
+			local chassis = seatPart.Parent.Parent
+			local wheels = chassis.wheels
+			local plataform = chassis.plataform
+			local steer = chassis.steer
+			local fuelValue = chassis.Configuration.fuel		
+			local ui
+			local isDevice = ''
+            --check if the player is on mobile or computer to know which ui to clone
+			if userInputService.TouchEnabled then
+				ui = vehicleGui:Clone()
+				playerGui.TouchGui.Parent = player
+				ui.mobile.Visible = true
+				isDevice = 'mobile'
+			else
+				ui = vehicleGui:Clone()
+				ui.pc.chassis.carName.Text = chassis.Name
+				ui.pc.Visible = true
+				isDevice = 'pc'
+			end
+			ui.Name = 'usingGUI'
+			ui.Parent = playerGui
+			ui.Enabled = true
+			ui.LocalScript.Enabled = true
+			ui = ui[isDevice]
+            --the folder where all the car physics are concentrated is obtained.
+			local rig = {suspension = chassis.rig.suspension}
+			cylindricals = {RR = rig.suspension.RR.CylindricalConstraint,RL = rig.suspension.RL.CylindricalConstraint}
+            --get the default values with which the vehicle is mounted, which is a string value made with json
+			local VTable = httpService:JSONDecode(chassis.VTable.Value)
+            --check what type of traction it is to know which tires to make them roll
+			if VTable.traction == 'awd' then
+				cylindricals.FL = rig.suspension.FL.CylindricalConstraint
+				cylindricals.FR = rig.suspension.FR.CylindricalConstraint
+			elseif VTable.traction == 'fwd' then
+				cylindricals = {FL = rig.suspension.FL.CylindricalConstraint,FR = rig.suspension.FR.CylindricalConstraint}
+			end
+            
+			local attachments = {FR = plataform.FR,FL = plataform.FL}
+            --these parameters are declared as they are used in a loop that creates raycast to know what material is being drifted.
+			local rayParams = RaycastParams.new()
+			rayParams.FilterDescendantsInstances = {chassis, character}
+			rayParams.IgnoreWater = false
+			rayParams.FilterType = Enum.RaycastFilterType.Exclude
+            --simple calculations
+			local seatTorque = seatPart.Torque
+			local maxAngularAcceleration = seatPart.MaxSpeed / (wheels.RR.physicalWheel.Size.Y / 2)
+			local exAngular = 0
+            --it puts the table of cylindricals that was declared when the if was put of which traction it is, and it puts them in motor
+			for i,cylindrical in pairs(cylindricals) do
+				cylindrical.AngularActuatorType = Enum.ActuatorType.Motor
+			end
 
-			-- Finally, any remaining information in the client systems is sent
+			seatConnection = seatPart.Changed:Connect(function(property)
 
-            addeyEvent:FireClient(player, 'refreshRadioIcon', not plataform.radio.IsPlaying)
-			
-			-- Sends all remaining information to the car controller
-			carEvent:FireAllClients({
-                localId,
-                network[localId],
-                plataform
-            }, 'engine')
+				if property == 'SteerFloat' then
+                    --Creates the effect of bending the rims sideways with a tweenservice
+					local orientation = Vector3.new(0, -seatPart.SteerFloat * seatPart.TurnSpeed, 90)
+					for i, attachment in pairs(attachments) do
+						tweenService:Create(attachment, TweenInfo.new(0.3), {Orientation = orientation}):Play()
+					end
+					chassis.steer.HingeConstraint.TargetAngle = (-seatPart.SteerFloat * seatPart.TurnSpeed)
+				elseif property == 'ThrottleFloat' then
+                    --checks whether you are moving forward or backward to turn on or turn off the red tail lights.
+					if seatPart.ThrottleFloat == -1 then
+						remoteEvent:FireServer('lights', 'brakes', true)
+					else
+						remoteEvent:FireServer('lights', 'brakes', false)
+					end
+                    --obtains parameters from the vehicleseat, performs multiplications to obtain the desired speed
+					local torque = math.abs(seatPart.ThrottleFloat * seatTorque)
+					local angularVelocity = math.sign(seatPart.ThrottleFloat) * maxAngularAcceleration
+					if torque == 0 then
+						torque = 2500
+					end
+					for i, cylindrical in pairs(cylindricals) do
+                        --iterate on the cylindricals with motor and adjust what was calculated.
+						cylindrical.MotorMaxTorque = torque
+						cylindrical.AngularVelocity = angularVelocity
+					end
+				end
+			end)
+            --Keys for more things on the chassis
+			inputConnection = userInputService.InputBegan:Connect(function(key, gp)
+				if gp then return end
+				if key.KeyCode == Enum.KeyCode.L then
+                    --the headlights turn on with a remotevent
+					remoteEvent:FireServer('lights', 'highlight')
+				elseif key.KeyCode == Enum.KeyCode.H then
+                    --the position of the initial horn is obtained, it is turned on, once the player stops pressing it stops beeping and the original sound position is passed by argument.
+					local pos = plataform.horn.TimePosition
+					remoteEvent:FireServer('horn', true)
+					repeat task.wait() until not userInputService:IsKeyDown(Enum.KeyCode.H)
+					remoteEvent:FireServer('horn', false, pos)
+				elseif key.KeyCode == Enum.KeyCode.Space then
+                    --In case the first space detection fails here's another one
+					humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
+					humanoid.Sit = false
+				elseif key.KeyCode == Enum.KeyCode.F then
+                    --police sirens
+					chassis.body.lightbar.turn:FireServer()
+				elseif key.KeyCode == Enum.KeyCode.P then
+                    --Drift system with handbrake
+					ui.chassis.handBrake.Visible = true
+                    --First iterate on the cylindricals with motor to stop them.
+					for i, cylindrical in pairs(cylindricals) do
+						cylindrical.AngularLimitsEnabled = true
+					end
+                    --then iterate and call the previously declared function that creates a detection of the material where the wheel is located to create a separate part of the vehicle that has the default vfx for the material (only 1 is created first to avoid input lag since a hearbeart must be created).
+					for i,cylindrical in pairs(cylindricals) do
+						local physical = wheels[i].physicalWheel
+						if physical:FindFirstChildWhichIsA('ParticleEmitter') then
+							createPartVFX(physical:FindFirstChildWhichIsA('ParticleEmitter'), physical.Position)
+						end
+					end
+					local connect
 
-            --print('[Seat] New-net')
-        end)
-    end)
-end)
- 
--- Detects when the player leaves and sends to check if there is a network [memory]
-playerService.PlayerRemoving:Connect(function(player)
-    local id = player.UserId
-	if network[id] then
-		-- This is a bug that occurred in case the car had fallen into the void
-		if not network[id]:IsDescendantOf(workspace) then network[id] = nil return end
-        network[id]:SetNetworkOwner(nil)
-        network[id] = nil
-    end
+					connect = runService.Heartbeat:Connect(function()
+                        --finally a detection cycle is created while the car is still at a higher speed than the one set to activate the drift vfx.
+						local velocity = seatPart.AssemblyLinearVelocity.Magnitude
+						if velocity >= VTable.driftVfxMinSpeed then
+							for i,cylindrical in pairs(cylindricals) do
+                                --creates raycast to detect what material is under the wheel
+								local rayDirection = -plataform.CFrame.UpVector * 150
+								local rayOrigin = plataform[i].WorldPosition
+								local raycast = workspace:Raycast(rayOrigin, rayDirection, rayParams)
+								local physical = wheels[i].physicalWheel
+								if raycast then
+                                    --gets the name of the material
+									local materialName = raycast.Material.Name
+                                    --look for the name of the material in a folder with all the vfx according to its name, if it does not find it use a default one.
+									if not vfxFolder:FindFirstChild(materialName) then
+										materialName = 'Normal'
+									end
+                                    --check if you already have a vfx to avoid creating a lot of them
+									if physical:FindFirstChildWhichIsA('ParticleEmitter') then
+										if physical:FindFirstChildWhichIsA('ParticleEmitter').Name ~= materialName then
+                                            --check if it is not the same one, if it is not the same one create it
+											createPartVFX(physical:FindFirstChildWhichIsA('ParticleEmitter'), physical.Position)
+										end
+									end
+									if physical:FindFirstChildWhichIsA('ParticleEmitter') and physical:FindFirstChildWhichIsA('ParticleEmitter').Name == materialName then
+										continue 
+									end
+									local newEmitter = vfxFolder[materialName]:Clone()
+									newEmitter.Parent = physical
+									newEmitter.Enabled = true
+								end
+							end
+						else
+                            --Sometimes it gave a speed error, so I solved it with an else
+							for i,cylindrical in pairs(cylindricals) do
+								local physical = wheels[i].physicalWheel
+								if physical:FindFirstChildWhichIsA('ParticleEmitter') then
+									createPartVFX(physical:FindFirstChildWhichIsA('ParticleEmitter'), physical.Position)
+								end
+							end
+						end
+					end)
+                    --detects when you stop pressing to erase the connection and avoid infinite cycling
+					repeat task.wait() until not userInputService:IsKeyDown(Enum.KeyCode.P)
+					if connect then connect:Disconnect() end -- disconnect it
+					for i,cylindrical in pairs(cylindricals) do
+						local physical = wheels[i].physicalWheel
+						if physical:FindFirstChildWhichIsA('ParticleEmitter') then
+							createPartVFX(physical:FindFirstChildWhichIsA('ParticleEmitter'), physical.Position)
+						end
+					end
+					if not usingSeat then return end -- the player may have exited the car while pressing p, so a conditional is used to see if a car follows in the variable
+					ui.chassis.handBrake.Visible = false
+                    --finally makes the wheels able to turn again
+					for i, cylindrical in pairs(cylindricals) do
+						cylindrical.AngularLimitsEnabled = false
+					end
+
+				end
+			end)
+            --This loop changes the text of a textlabel at the speed of the carriage using simple calculations 
+			heartConnection = runService.Heartbeat:Connect(function()
+				ui.chassis.velocity.Text = math.floor(seatPart.AssemblyLinearVelocity.Magnitude)
+                --it also verifies in real time how much gasoline is left in the car from a value of this and changes the size since it is represented with a frame from top to botto
+				local calcule = fuelValue.Value/100
+				local newSize = UDim2.fromScale(1,calcule)
+				ui.chassis.buttons.Frame.icon.Frame.Size = newSize
+			end)
+		end
+	end
 end)
